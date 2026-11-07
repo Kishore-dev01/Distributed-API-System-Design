@@ -1,0 +1,160 @@
+services:
+  load-balancer:
+    image: nginx:1.27-alpine
+    container_name: load-balancer
+    ports:
+      - "80:80"
+    volumes:
+      - ./load-balancer/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ui:/usr/share/nginx/html/ui:ro
+    depends_on:
+      - api-gateway-1
+      - api-gateway-2
+
+  api-gateway-1:
+    build: ./services/api-gateway
+    environment:
+      PORT: 8080
+      GATEWAY_ID: api-gateway-1
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      USER_SERVICE_URLS: http://user-service-1:3001,http://user-service-2:3001
+      ORDER_SERVICE_URLS: http://order-service:3002
+      STORAGE_SERVICE_URLS: http://storage-service:3003
+    depends_on:
+      - redis
+      - user-service-1
+      - user-service-2
+      - order-service
+      - storage-service
+
+  api-gateway-2:
+    build: ./services/api-gateway
+    environment:
+      PORT: 8080
+      GATEWAY_ID: api-gateway-2
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      USER_SERVICE_URLS: http://user-service-1:3001,http://user-service-2:3001
+      ORDER_SERVICE_URLS: http://order-service:3002
+      STORAGE_SERVICE_URLS: http://storage-service:3003
+    depends_on:
+      - redis
+      - user-service-1
+      - user-service-2
+      - order-service
+      - storage-service
+
+  user-service-1:
+    build: ./services/user-service
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-platform}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SERVICE_INSTANCE: user-service-1
+    depends_on:
+      - postgres
+      - redis
+
+  user-service-2:
+    build: ./services/user-service
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-platform}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SERVICE_INSTANCE: user-service-2
+    depends_on:
+      - postgres
+      - redis
+
+  order-service:
+    build: ./services/order-service
+    environment:
+      PORT: 3002
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-platform}
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_CLIENT_ID: ${KAFKA_CLIENT_ID:-platform-app}
+    depends_on:
+      - postgres
+      - kafka
+
+  storage-service:
+    build: ./services/storage-service
+    environment:
+      PORT: 3003
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio}
+      MINIO_PORT: ${MINIO_PORT:-9000}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-app-assets}
+    depends_on:
+      - minio
+
+  event-consumer:
+    build: ./services/event-consumer
+    environment:
+      KAFKA_BROKER: ${KAFKA_BROKER:-kafka:9092}
+      KAFKA_CLIENT_ID: ${KAFKA_CLIENT_ID:-platform-app}
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-order-events-consumer}
+    depends_on:
+      - kafka
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-platform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  minio_data:

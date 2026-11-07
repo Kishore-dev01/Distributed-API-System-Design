@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>System Design Demo — Object Storage via API Gateway</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --card-border: #334155;
+    --accent: #38bdf8;
+    --accent-2: #a78bfa;
+    --ok: #4ade80;
+    --err: #f87171;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+
+  .diagram {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .col { display: flex; flex-direction: column; gap: 10px; }
+  .box {
+    background: var(--card);
+    border: 2px solid var(--card-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    min-width: 140px;
+    text-align: center;
+    font-size: 13px;
+    transition: border-color 0.25s, box-shadow 0.25s, transform 0.25s;
+    position: relative;
+  }
+  .box .label { font-weight: 600; display: block; margin-bottom: 4px; }
+  .box .sub { color: var(--muted); font-size: 11px; }
+  .badge {
+    position: absolute;
+    top: -10px;
+    right: -10px;
+    background: var(--accent-2);
+    color: #0f172a;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+  }
+  .box.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
+    transform: translateY(-2px);
+  }
+  .box.active.err { border-color: var(--err); box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.25); }
+
+  .arrow {
+    color: var(--card-border);
+    font-size: 22px;
+    transition: color 0.25s;
+  }
+  .arrow.active { color: var(--accent); }
+
+  .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  button {
+    background: var(--accent);
+    color: #0f172a;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--card-border); }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--card-border); }
+  th { color: var(--muted); font-weight: 600; }
+  td.gw-1 { color: var(--accent); }
+  td.gw-2 { color: var(--accent-2); }
+  td.status-ok { color: var(--ok); }
+  td.status-err { color: var(--err); }
+
+  .panel { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 16px; max-width: 720px; }
+</style>
+</head>
+<body>
+  <h1>Object Storage Request Flow</h1>
+  <p class="subtitle">Client → Nginx Load Balancer → API Gateway (1 or 2) → Storage Service → Object Storage (MinIO)</p>
+
+  <div class="diagram" id="diagram">
+    <div class="box" id="box-client"><span class="label">Browser</span><span class="sub">this page</span></div>
+    <div class="arrow" id="arrow-lb">→</div>
+    <div class="box" id="box-lb"><span class="label">Load Balancer</span><span class="sub">Nginx :80</span></div>
+    <div class="arrow" id="arrow-gw">→</div>
+    <div class="col">
+      <div class="box" id="box-gw1">
+        <span class="badge" id="count-gw1">0</span>
+        <span class="label">API Gateway 1</span>
+        <span class="sub">api-gateway-1</span>
+      </div>
+      <div class="box" id="box-gw2">
+        <span class="badge" id="count-gw2">0</span>
+        <span class="label">API Gateway 2</span>
+        <span class="sub">api-gateway-2</span>
+      </div>
+    </div>
+    <div class="arrow" id="arrow-storage">→</div>
+    <div class="box" id="box-storage"><span class="label">Storage Service</span><span class="sub">:3003</span></div>
+    <div class="arrow" id="arrow-minio">→</div>
+    <div class="box" id="box-minio"><span class="label">Object Storage</span><span class="sub">MinIO / S3</span></div>
+  </div>
+
+  <div class="controls">
+    <button id="btn-single">Send 1 storage request</button>
+    <button id="btn-burst" class="secondary">Send 10 requests</button>
+  </div>
+
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Gateway</th><th>Status</th><th>Object</th></tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </div>
+
+<script>
+  const counts = { 'api-gateway-1': 0, 'api-gateway-2': 0 };
+  const boxIds = ['box-client', 'box-lb', 'box-gw1', 'box-gw2', 'box-storage', 'box-minio'];
+  const arrowIds = ['arrow-lb', 'arrow-gw', 'arrow-storage', 'arrow-minio'];
+  let activeTimer = null;
+
+  function clearActive() {
+    boxIds.forEach((id) => document.getElementById(id).classList.remove('active', 'err'));
+    arrowIds.forEach((id) => document.getElementById(id).classList.remove('active'));
+  }
+
+  function highlightPath(gatewayId, ok) {
+    clearTimeout(activeTimer);
+    clearActive();
+    const gwBoxId = gatewayId === 'api-gateway-2' ? 'box-gw2' : 'box-gw1';
+    const path = ['box-client', 'arrow-lb', 'box-lb', 'arrow-gw', gwBoxId, 'arrow-storage', 'box-storage', 'arrow-minio', 'box-minio'];
+    path.forEach((id) => {
+      const el = document.getElementById(id);
+      el.classList.add('active');
+      if (!ok && boxIds.includes(id)) el.classList.add('err');
+    });
+    activeTimer = setTimeout(clearActive, 1200);
+  }
+
+  function bumpCount(gatewayId) {
+    if (!(gatewayId in counts)) return;
+    counts[gatewayId] += 1;
+    document.getElementById(gatewayId === 'api-gateway-2' ? 'count-gw2' : 'count-gw1').textContent = counts[gatewayId];
+  }
+
+  function logRow(gatewayId, statusText, ok, objectName) {
+    const tbody = document.getElementById('log-body');
+    const tr = document.createElement('tr');
+    const gwClass = gatewayId === 'api-gateway-2' ? 'gw-2' : 'gw-1';
+    tr.innerHTML = `
+      <td>${new Date().toLocaleTimeString()}</td>
+      <td class="${gwClass}">${gatewayId}</td>
+      <td class="${ok ? 'status-ok' : 'status-err'}">${statusText}</td>
+      <td>${objectName}</td>
+    `;
+    tbody.prepend(tr);
+    while (tbody.rows.length > 20) tbody.deleteRow(-1);
+  }
+
+  async function sendOne() {
+    const objectName = `demo/file-${Date.now()}.png`;
+    try {
+      const res = await fetch('/api/storage/presign-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ objectName, contentType: 'image/png' })
+      });
+      const gatewayId = res.headers.get('x-gateway-id') || 'unknown';
+      highlightPath(gatewayId, res.ok);
+      bumpCount(gatewayId);
+      logRow(gatewayId, res.ok ? 'success' : `HTTP ${res.status}`, res.ok, objectName);
+    } catch (err) {
+      logRow('unknown', `network error: ${err.message}`, false, objectName);
+    }
+  }
+
+  document.getElementById('btn-single').addEventListener('click', () => sendOne());
+
+  document.getElementById('btn-burst').addEventListener('click', async () => {
+    const burstBtn = document.getElementById('btn-burst');
+    burstBtn.disabled = true;
+    for (let i = 0; i < 10; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await sendOne();
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    burstBtn.disabled = false;
+  });
+</script>
+</body>
+</html>
